@@ -8,13 +8,14 @@
 #include "reference_calc.h"
 #include "compare.h"
 
+//include the definitions of the above functions for this homework
+#include "HW1.h"
+
 void your_rgba_to_greyscale(const uchar4 * const h_rgbaImage, 
                             uchar4 * const d_rgbaImage,
                             unsigned char* const d_greyImage, 
                             size_t numRows, size_t numCols);
 
-//include the definitions of the above functions for this homework
-#include "HW1.cpp"
 
 int main(int argc, char **argv) {
   uchar4        *h_rgbaImage, *d_rgbaImage;
