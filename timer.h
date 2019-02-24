@@ -2,7 +2,6 @@
 #define GPU_TIMER_H__
 
 #include <cuda_runtime.h>
-inline
 struct GpuTimer
 {
   cudaEvent_t start;
