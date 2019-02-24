@@ -6,17 +6,26 @@
 ############################################################################
 
 cmake_minimum_required(VERSION 3.5)
-project ( prob1 )
-find_package(CUDA QUIET REQUIRED)
+project ( prob1 LANGUAGES CUDA CXX)
+
+find_package(CUDA REQUIRED)
 find_package( OpenCV REQUIRED ) 
+
 set(
     CUDA_NVCC_FLAGS
     ${CUDA_NVCC_FLAGS}
     -O3 -gencode arch=compute_30,code=sm_30
 )
-include_directories( ${PROJECT_SOURCE_DIR} ${OpenCV_INCLUDE_DIRS} )
+
+
 file( GLOB  hdr *.hpp *.h )
 file( GLOB  cu  *.cu)
-SET (problem_set_1_files main.cpp reference_calc.cpp compare.cpp HW1.cpp)
-CUDA_ADD_EXECUTABLE( prob1 ${problem_set_1_files} ${hdr} ${cu})
+
+include_directories( ${OpenCV_INCLUDE_DIRS} )
+include_directories( ${CUDA_INCLUDE_DIRS} )
+set(problem_set_1_files main.cpp reference_calc.cpp compare.cpp)
+
+add_executable(prob1 ${problem_set_1_files} ${hdr} ${cu})
+target_include_directories(prob1 PUBLIC "${CMAKE_SOURCE_DIR}/*h")
 target_link_libraries( prob1 ${OpenCV_LIBS})
+target_link_libraries( prob1 ${CUDA_LIBS})
