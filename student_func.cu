@@ -1,313 +1,224 @@
-// Homework 2
-// Image Blurring
-//
-// In this homework we are blurring an image. To do this, imagine that we have
-// a square array of weight values. For each pixel in the image, imagine that we
-// overlay this square array of weights on top of the image such that the center
-// of the weight array is aligned with the current pixel. To compute a blurred
-// pixel value, we multiply each pair of numbers that line up. In other words, we
-// multiply each weight with the pixel underneath it. Finally, we add up all of the
-// multiplied numbers and assign that value to our output for the current pixel.
-// We repeat this process for all the pixels in the image.
+/* Udacity Homework 3
+   HDR Tone-mapping
 
-// To help get you started, we have included some useful notes here.
+  Background HDR
+  ==============
 
-//****************************************************************************
+  A High Dynamic Range (HDR) image contains a wider variation of intensity
+  and color than is allowed by the RGB format with 1 byte per channel that we
+  have used in the previous assignment.  
 
-// For a color image that has multiple channels, we suggest separating
-// the different color channels so that each color is stored contiguously
-// instead of being interleaved. This will simplify your code.
+  To store this extra information we use single precision floating point for
+  each channel.  This allows for an extremely wide range of intensity values.
 
-// That is instead of RGBARGBARGBARGBA... we suggest transforming to three
-// arrays (as in the previous homework we ignore the alpha channel again):
-//  1) RRRRRRRR...
-//  2) GGGGGGGG...
-//  3) BBBBBBBB...
-//
-// The original layout is known an Array of Structures (AoS) whereas the
-// format we are converting to is known as a Structure of Arrays (SoA).
+  In the image for this assignment, the inside of church with light coming in
+  through stained glass windows, the raw input floating point values for the
+  channels range from 0 to 275.  But the mean is .41 and 98% of the values are
+  less than 3!  This means that certain areas (the windows) are extremely bright
+  compared to everywhere else.  If we linearly map this [0-275] range into the
+  [0-255] range that we have been using then most values will be mapped to zero!
+  The only thing we will be able to see are the very brightest areas - the
+  windows - everything else will appear pitch black.
 
-// As a warm-up, we will ask you to write the kernel that performs this
-// separation. You should then write the "meat" of the assignment,
-// which is the kernel that performs the actual blur. We provide code that
-// re-combines your blurred results for each color channel.
+  The problem is that although we have cameras capable of recording the wide
+  range of intensity that exists in the real world our monitors are not capable
+  of displaying them.  Our eyes are also quite capable of observing a much wider
+  range of intensities than our image formats / monitors are capable of
+  displaying.
 
-//****************************************************************************
+  Tone-mapping is a process that transforms the intensities in the image so that
+  the brightest values aren't nearly so far away from the mean.  That way when
+  we transform the values into [0-255] we can actually see the entire image.
+  There are many ways to perform this process and it is as much an art as a
+  science - there is no single "right" answer.  In this homework we will
+  implement one possible technique.
 
-// You must fill in the gaussian_blur kernel to perform the blurring of the
-// inputChannel, using the array of weights, and put the result in the outputChannel.
+  Background Chrominance-Luminance
+  ================================
 
-// Here is an example of computing a blur, using a weighted average, for a single
-// pixel in a small image.
-//
-// Array of weights:
-//
-//  0.0  0.2  0.0
-//  0.2  0.2  0.2
-//  0.0  0.2  0.0
-//
-// Image (note that we align the array of weights to the center of the box):
-//
-//    1  2  5  2  0  3
-//       -------
-//    3 |2  5  1| 6  0       0.0*2 + 0.2*5 + 0.0*1 +
-//      |       |
-//    4 |3  6  2| 1  4   ->  0.2*3 + 0.2*6 + 0.2*2 +   ->  3.2
-//      |       |
-//    0 |4  0  3| 4  2       0.0*4 + 0.2*0 + 0.0*3
-//       -------
-//    9  6  5  0  3  9
-//
-//         (1)                         (2)                 (3)
-//
-// A good starting place is to map each thread to a pixel as you have before.
-// Then every thread can perform steps 2 and 3 in the diagram above
-// completely independently of one another.
+  The RGB space that we have been using to represent images can be thought of as
+  one possible set of axes spanning a three dimensional space of color.  We
+  sometimes choose other axes to represent this space because they make certain
+  operations more convenient.
 
-// Note that the array of weights is square, so its height is the same as its width.
-// We refer to the array of weights as a filter, and we refer to its width with the
-// variable filterWidth.
+  Another possible way of representing a color image is to separate the color
+  information (chromaticity) from the brightness information.  There are
+  multiple different methods for doing this - a common one during the analog
+  television days was known as Chrominance-Luminance or YUV.
 
-//****************************************************************************
+  We choose to represent the image in this way so that we can remap only the
+  intensity channel and then recombine the new intensity values with the color
+  information to form the final image.
 
-// Your homework submission will be evaluated based on correctness and speed.
-// We test each pixel against a reference solution. If any pixel differs by
-// more than some small threshold value, the system will tell you that your
-// solution is incorrect, and it will let you try again.
+  Old TV signals used to be transmitted in this way so that black & white
+  televisions could display the luminance channel while color televisions would
+  display all three of the channels.
+  
 
-// Once you have gotten that working correctly, then you can think about using
-// shared memory and having the threads cooperate to achieve better performance.
+  Tone-mapping
+  ============
 
-//****************************************************************************
+  In this assignment we are going to transform the luminance channel (actually
+  the log of the luminance, but this is unimportant for the parts of the
+  algorithm that you will be implementing) by compressing its range to [0, 1].
+  To do this we need the cumulative distribution of the luminance values.
 
-// Also note that we've supplied a helpful debugging function called checkCudaErrors.
-// You should wrap your allocation and copying statements like we've done in the
-// code we're supplying you. Here is an example of the unsafe way to allocate
-// memory on the GPU:
-//
-// cudaMalloc(&d_red, sizeof(unsigned char) * numRows * numCols);
-//
-// Here is an example of the safe way to do the same thing:
-//
-// checkCudaErrors(cudaMalloc(&d_red, sizeof(unsigned char) * numRows * numCols));
-//
-// Writing code the safe way requires slightly more typing, but is very helpful for
-// catching mistakes. If you write code the unsafe way and you make a mistake, then
-// any subsequent kernels won't compute anything, and it will be hard to figure out
-// why. Writing code the safe way will inform you as soon as you make a mistake.
+  Example
+  -------
 
-// Finally, remember to free the memory you allocate at the end of the function.
+  input : [2 4 3 3 1 7 4 5 7 0 9 4 3 2]
+  min / max / range: 0 / 9 / 9
 
-//****************************************************************************
+  histo with 3 bins: [4 7 3]
+
+  cdf : [4 11 14]
+
+
+  Your task is to calculate this cumulative distribution by following these
+  steps.
+
+*/
 
 #include "utils.h"
 
+const int BLOCK_SIZE = 1024
+
 __global__
-void gaussian_blur(const unsigned char* const inputChannel,
-                   unsigned char* const outputChannel,
-                   int numRows, int numCols,
-                   const float* const filter, const int filterWidth) {
-  // TODO
+void shared_reduce_kernel_min(const float* const d_logLuminance,
+                              float* d_write_reduce_to,
+                              const int input_size) {
+  extern __shared__ float shared_output[]
+
+  int global_id = threadIdx.x + blockDim.x * blockIdx.x;
+  int local_id = threadIdx.x;
+
+  // thread_copies_input_data_to shared_memory
+  if (global_id >= input_size) {
+    shared_output[local_id] = d_write_reduce_to[0];
+  } else {
+    shared_output[local_id] = d_write_reduce_to[global_id];
+  }
+  __synchthreads();
   
-  // NOTE: Be sure to compute any intermediate results in floating point
-  // before storing the final result as unsigned char.
-  // int position_x = blockIdx.x * blockDim.x + threadIdx.x;
-  // int position_y = blockIdx.y * blockDim.y + threadIdx.y;
-  // // NOTE: Be careful not to try to access memory that is outside the bounds of
-  // // the image. You'll want code that performs the following check before accessing
-  // // GPU memory:
-  // //
-  // if ( position_x >= numCols || position_y >= numRows ) {
-  //     return;
-  // }
+  
+  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (local_id < s) {
+      shared_output[local_id] = min(shared_output[local_id],
+                                    shared_output[local_id + s]);
+    }
+    __synchthreads();
+  }
 
-  // // NOTE: If a thread's absolute position 2D position is within the image, but some of
-  // // its neighbors are outside the image, then you will need to be extra careful. Instead
-  // // of trying to read such a neighbor value from GPU memory (which won't work because
-  // // the value is out of bounds), you should explicitly clamp the neighbor values you read
-  // // to be within the bounds of the image. If this is not clear to you, then please refer
-  // // to sequential reference solution for the exact clamping semantics you should follow.
-
-  // int absolute_pos = position_x + position_y * numRows;
-  // float result = 0.0;
-  // for (int dx = -filterWidth/2; dx <= filterWidth/2; dx++) {
-  //   for (int dy = -filterWidth/2; dy <= filterWidth/2; dy++) {
-  //     int weight_row = min(max(position_x + dx, 0), numRows - 1);
-  //     int weight_col = min(max(position_y + dy, 0), numCols - 1);
-
-  //     int index = weight_row + weight_col*numRows;
-  //     float weight = filter[index];
-  //     float old_channel =  inputChannel[index];
-  //     result += weight *static_cast<float> (old_channel);
-  //   }
-  // }
-  // outputChannel[absolute_pos] = result;
-  int absolute_image_position_x = blockDim.x * blockIdx.x + threadIdx.x;
-	int absolute_image_position_y = blockDim.y * blockIdx.y + threadIdx.y;
-
-	
-	if (absolute_image_position_x < numCols && absolute_image_position_y < numRows) {
-
-		int ID = absolute_image_position_y * numRows + absolute_image_position_x;
-		float temporary=0.0;
-
-		for (int i = 0; i < filterWidth; ++i) { // row
-			for (int j = 0; j < filterWidth; ++j) { // column
-				int row_index = absolute_image_position_y + i-filterWidth/2;
-				int column_index = absolute_image_position_x + j-filterWidth/2;
-				row_index = max(min(row_index, numRows - 1), 0);
-				column_index = max(min(column_index, numCols - 1), 0);
-				temporary += float(inputChannel[row_index*numCols+column_index]) * filter[i*filterWidth + j];
-			}
-		}
-		
-		outputChannel[ID] = temporary;
-
+  if (local_id == 0) {
+    d_write_reduce_to[blockIdx.x] = shared_data[0];
   }
 }
 
-//This kernel takes in an image represented as a uchar4 and splits
-//it into three images consisting of only one color channel each
 __global__
-void separateChannels(const uchar4* const inputImageRGBA,
-                      int numRows,
-                      int numCols,
-                      unsigned char* const redChannel,
-                      unsigned char* const greenChannel,
-                      unsigned char* const blueChannel)
-{
-  // TODO
-  //
-  // NOTE: Be careful not to try to access memory that is outside the bounds of
-  // the image. You'll want code that performs the following check before accessing
-  // GPU memory:
-  //
-  
-  int absolute_image_position_x = blockIdx.x * blockDim.x + threadIdx.x;
-  int absolute_image_position_y = blockIdx.y * blockDim.y + threadIdx.y;
-  if ( absolute_image_position_x >= numCols ||
-       absolute_image_position_y >= numRows ) {
-      return;
+void shared_reduce_kernel_max(const float* const d_logLuminance,
+                              float* d_write_reduce_to,
+                              const int input_size) {
+  extern __shared__ float shared_output[]
+
+  int global_id = threadIdx.x + blockDim.x * blockIdx.x;
+  int local_id = threadIdx.x;
+
+  // thread_copies_input_data_to shared_memory
+  if (global_id >= input_size) {
+    shared_output[local_id] = d_write_reduce_to[0];
+  } else {
+    shared_output[local_id] = d_write_reduce_to[global_id];
   }
-  int pixel_index = absolute_image_position_y * numRows + absolute_image_position_x;
-  uchar4 current_struct = inputImageRGBA[pixel_index];
-  redChannel[pixel_index] = current_struct.x;
-  greenChannel[pixel_index] = current_struct.y;
-  blueChannel[pixel_index] = current_struct.z;
+  __synchthreads();
+  
+  
+  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+    if (local_id < s) {
+      shared_output[local_id] = max(shared_output[local_id],
+                                    shared_output[local_id + s]);
+    }
+    __synchthreads();
+  }
+
+  if (local_id == 0) {
+    d_write_reduce_to[blockIdx.x] = shared_data[0];
+  }
 }
 
-//This kernel takes in three color channels and recombines them
-//into one image.  The alpha channel is set to 255 to represent
-//that this image has no transparency.
 __global__
-void recombineChannels(const unsigned char* const redChannel,
-                       const unsigned char* const greenChannel,
-                       const unsigned char* const blueChannel,
-                       uchar4* const outputImageRGBA,
-                       int numRows,
-                       int numCols)
-{
-  const int2 thread_2D_pos = make_int2( blockIdx.x * blockDim.x + threadIdx.x,
-                                        blockIdx.y * blockDim.y + threadIdx.y);
-
-  const int thread_1D_pos = thread_2D_pos.y * numCols + thread_2D_pos.x;
-
-  //make sure we don't try and access memory outside the image
-  //by having any threads mapped there return early
-  if (thread_2D_pos.x >= numCols || thread_2D_pos.y >= numRows)
+void histogram_calculation(unsigned int* out_histo, 
+                           const float* d_, 
+                           int num_bins, 
+                           int input_size,
+                           float min_val,
+                           float range_vals) {
+  int thread_id = threadIdx.x;
+  int global_id = threadIdx.x + blockDim.x * blockIdx.x;
+  
+  if (global_id >= input_size) {
     return;
+  }
 
-  unsigned char red   = redChannel[thread_1D_pos];
-  unsigned char green = greenChannel[thread_1D_pos];
-  unsigned char blue  = blueChannel[thread_1D_pos];
-
-  //Alpha should be 255 for no transparency
-  uchar4 outputPixel = make_uchar4(red, green, blue, 255);
-
-  outputImageRGBA[thread_1D_pos] = outputPixel;
+  int bin = (int)((d_[global_id] - min_val) / (float)range_vals) * num_bins;
+  atomicAdd(&(out_histro[bin]), 1);
 }
 
-unsigned char *d_red, *d_green, *d_blue;
-float         *d_filter;
+void find_max_and_min(const float* const d_logLuminance,
+                      float& min_logLum,
+                      float& max_logLum,
+                      int input_size) {
+  int threads_per_block = BLOCK_SIZE;
+  int output_size= (input_size - 1)/BLOCK_SIZE + 1;
+  dim3 block_size = dim3(threads_per_block, 1, 1);
+  dim3 grid_size = dim3(output_size, 1, 1);
 
-void allocateMemoryAndCopyToGPU(const size_t numRowsImage, const size_t numColsImage,
-                                const float* const h_filter, const size_t filterWidth)
+  float* d_reduce_input;
+  checkCudaErrors(cudaMalloc((void**)&d_reduce_input,
+                             input_size * sizeof(float)));
+  checkCudaErrors(cudaMemcpy(d_reduce_input,
+                             d_logLuminance,
+                             input_size * sizeof(float),
+                             cudaMemcpyDeviceToDevice));
+  
+  while (output_size > 1) {
+    float* d_reduce_output;
+    checkCudaErrors(cudaMalloc((void**)&d_reduce_output),
+                               output_size * sizeof(float));
+    shared_reduce_kernel_min<<<grid_size, block_size>>>(d_reduce_output,
+                                                        d_reduce_intput,
+                                                        input_size);
+    checkCudaErrors(cudaFree(d_reduce_input));
+
+    input_size = output_size;
+    output_size = (input_size - 1) / BLOCK_SIZE + 1;
+    block_size = dim3(threads_per_block, 1, 1);
+    grid_size = dim3(output_size); 
+    d_reduce_input = d_reduce_output;
+  }
+
+  float* h_reduce_output= (float *)malloc(sizeof(float));
+  checkCudaErrors(cudaMemcpy(h_reduce_output, d_reduce_ouput, sizeof(float), cudaMemcpyDeviceToHost));
+  min_logLum = h_reduce_output[0];
+}
+                      
+
+void your_histogram_and_prefixsum(const float* const d_logLuminance,
+                                  unsigned int* const d_cdf,
+                                  float &min_logLum,
+                                  float &max_logLum,
+                                  const size_t numRows,
+                                  const size_t numCols,
+                                  const size_t numBins)
 {
-
-  //allocate memory for the three different channels
-  //original
-  checkCudaErrors(cudaMalloc(&d_red,   sizeof(unsigned char) * numRowsImage * numColsImage));
-  checkCudaErrors(cudaMalloc(&d_green, sizeof(unsigned char) * numRowsImage * numColsImage));
-  checkCudaErrors(cudaMalloc(&d_blue,  sizeof(unsigned char) * numRowsImage * numColsImage));
-
-  //TODO:
-  //Allocate memory for the filter on the GPU
-  //Use the pointer d_filter that we have already declared for you
-  //You need to allocate memory for the filter with cudaMalloc
-  //be sure to use checkCudaErrors like the above examples to
-  //be able to tell if anything goes wrong
-  //IMPORTANT: Notice that we pass a pointer to a pointer to cudaMalloc
-  checkCudaErrors(cudaMalloc(&d_filter, sizeof(float) * filterWidth * filterWidth));
-  //TODO:
-  //Copy the filter on the host (h_filter) to the memory you just allocated
-  //on the GPU.  cudaMemcpy(dst, src, numBytes, cudaMemcpyHostToDevice);
-  //Remember to use checkCudaErrors!
-  checkCudaErrors(cudaMemcpy(d_filter, h_filter, sizeof(float) * filterWidth * filterWidth, cudaMemcpyHostToDevice));
-}
-
-void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_inputImageRGBA,
-                        uchar4* const d_outputImageRGBA, const size_t numRows, const size_t numCols,
-                        unsigned char *d_redBlurred, 
-                        unsigned char *d_greenBlurred, 
-                        unsigned char *d_blueBlurred,
-                        const int filterWidth) {
-  int blockWidth = 32;
-  //TODO: Set reasonable block size (i.e., number of threads per block)
-  const dim3 blockSize = dim3(blockWidth, blockWidth, 1);
-
-  //TODO:
-  //Compute correct grid size (i.e., number of blocks per kernel launch)
-  //from the image size and and block size.
-  int blocksX = numRows/blockWidth + 1;
-  int blocksY = numCols/blockWidth + 1;
-
-  const dim3 gridSize = dim3(blocksX, blocksY);
-  //TODO: Launch a kernel for separating the RGBA image into different color channels
-  separateChannels<<<gridSize, blockSize>>>(d_inputImageRGBA, numRows, numCols,
-                                            d_red, d_green, d_blue);
-  // Call cudaDeviceSynchronize(), then call checkCudaErrors() immediately after
-  // launching your kernel to make sure that you didn't make any mistakes.
-  cudaDeviceSynchronize();
-  checkCudaErrors(cudaGetLastError());
-
-  //TODO: Call your convolution kernel here 3 times, once for each color channel.
-  gaussian_blur<<<gridSize, blockSize>>>(d_red, d_redBlurred, numCols, numCols, d_filter, filterWidth);
-  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-  gaussian_blur<<<gridSize, blockSize>>>(d_blue, d_blueBlurred, numCols, numCols, d_filter, filterWidth);
-  gaussian_blur<<<gridSize, blockSize>>>(d_green, d_greenBlurred, numCols, numCols, d_filter, filterWidth);
-  // Again, call cudaDeviceSynchronize(), then call checkCudaErrors() immediately after
-  // launching your kernel to make sure that you didn't make any mistakes.
-  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-
-  // Now we recombine your results. We take care of launching this kernel for you.
-  //
-  // NOTE: This kernel launch depends on the gridSize and blockSize variables,
-  // which you must set yourself.
-  recombineChannels<<<gridSize, blockSize>>>(d_redBlurred,
-                                             d_greenBlurred,
-                                             d_blueBlurred,
-                                             d_outputImageRGBA,
-                                             numRows,
-                                             numCols);
-  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-
-}
-
-
-//Free all the memory that we allocated
-//TODO: make sure you free any arrays that you allocated
-void cleanup() {
-  checkCudaErrors(cudaFree(d_red));
-  checkCudaErrors(cudaFree(d_green));
-  checkCudaErrors(cudaFree(d_blue));
+  //TODO
+  /*Here are the steps you need to implement
+    1) find the minimum and maximum value in the input logLuminance channel
+       store in min_logLum and max_logLum
+    2) subtract them to find the range
+    3) generate a histogram of all the values in the logLuminance channel using
+       the formula: bin = (lum[i] - lumMin) / lumRange * numBins
+    4) Perform an exclusive scan (prefix sum) on the histogram to get
+       the cumulative distribution of luminance values (this should go in the
+       incoming d_cdf pointer which already has been allocated for you)       */
+  find_max_and_min(d_logLuminance, min_logLum, max_logLum);
 }

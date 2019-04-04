@@ -1,7 +1,4 @@
-#include <opencv2/core/core.hpp>
-#include <opencv2/highgui/highgui.hpp>
 #include <opencv2/opencv.hpp>
-
 #include "utils.h"
 
 void compareImages(std::string reference_filename, std::string test_filename, bool useEpsCheck,
@@ -24,7 +21,7 @@ void compareImages(std::string reference_filename, std::string test_filename, bo
 
   diff = diffSingleChannel.reshape(reference.channels(), 0);
 
-  cv::imwrite("HW2_differenceImage.png", diff);
+  cv::imwrite("HW3_differenceImage.png", diff);
   //OK, now we can start comparing values...
   unsigned char *referencePtr = reference.ptr<unsigned char>(0);
   unsigned char *testPtr = test.ptr<unsigned char>(0);

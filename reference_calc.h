@@ -1,8 +1,8 @@
 #ifndef REFERENCE_H__
 #define REFERENCE_H__
 
-void referenceCalculation(const uchar4* const rgbaImage, uchar4 *const outputImage,
-                          size_t numRows, size_t numCols,
-                          const float* const filter, const int filterWidth);
+void referenceCalculation(const float* const h_logLuminance, unsigned int* const h_cdf,
+                          const size_t numRows, const size_t numCols, const size_t numBins, 
+						  float &logLumMin, float &logLumMax);
 
 #endif

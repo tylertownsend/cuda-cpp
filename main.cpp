@@ -1,41 +1,41 @@
-//Udacity HW2 Driver
+//Udacity HW3 Driver
 
 #include <iostream>
 #include "timer.h"
 #include "utils.h"
 #include <string>
 #include <stdio.h>
+#include <algorithm>
 
-#include "reference_calc.h"
 #include "compare.h"
+#include "reference_calc.h"
 
-//include the definitions of the above functions for this homework
-#include "HW2.h"
+// Functions from HW3.cu
+void preProcess(float **d_luminance, unsigned int **d_cdf,
+                size_t *numRows, size_t *numCols, unsigned int *numBins,
+                const std::string& filename);
 
+void postProcess(const std::string& output_file, size_t numRows, size_t numCols,
+                 float min_logLum, float max_logLum);
 
-/*******  DEFINED IN student_func.cu *********/
+void cleanupGlobalMemory(void);
 
-void your_gaussian_blur(const uchar4 * const h_inputImageRGBA, uchar4 * const d_inputImageRGBA,
-                        uchar4* const d_outputImageRGBA,
-                        const size_t numRows, const size_t numCols,
-                        unsigned char *d_redBlurred,
-                        unsigned char *d_greenBlurred,
-                        unsigned char *d_blueBlurred,
-                        const int filterWidth);
+// Function from student_func.cu
+void your_histogram_and_prefixsum(const float* const d_luminance,
+                                  unsigned int* const d_cdf,
+                                  float &min_logLum,
+                                  float &max_logLum,
+                                  const size_t numRows,
+                                  const size_t numCols,
+                                  const size_t numBins);
 
-void allocateMemoryAndCopyToGPU(const size_t numRowsImage, const size_t numColsImage,
-                                const float* const h_filter, const size_t filterWidth);
-
-
-/*******  Begin main *********/
 
 int main(int argc, char **argv) {
-  uchar4 *h_inputImageRGBA,  *d_inputImageRGBA;
-  uchar4 *h_outputImageRGBA, *d_outputImageRGBA;
-  unsigned char *d_redBlurred, *d_greenBlurred, *d_blueBlurred;
+  float *d_luminance;
+  unsigned int *d_cdf;
 
-  float *h_filter;
-  int    filterWidth;
+  size_t numRows, numCols;
+  unsigned int numBins;
 
   std::string input_file;
   std::string output_file;
@@ -43,17 +43,18 @@ int main(int argc, char **argv) {
   double perPixelError = 0.0;
   double globalError   = 0.0;
   bool useEpsCheck = false;
+
   switch (argc)
   {
 	case 2:
 	  input_file = std::string(argv[1]);
-	  output_file = "HW2_output.png";
-	  reference_file = "HW2_reference.png";
+	  output_file = "HW3_output.png";
+	  reference_file = "HW3_reference.png";
 	  break;
 	case 3:
 	  input_file  = std::string(argv[1]);
       output_file = std::string(argv[2]);
-	  reference_file = "HW2_reference.png";
+	  reference_file = "HW3_reference.png";
 	  break;
 	case 4:
 	  input_file  = std::string(argv[1]);
@@ -69,20 +70,21 @@ int main(int argc, char **argv) {
       globalError   = atof(argv[5]);
 	  break;
 	default:
-      std::cerr << "Usage: ./HW2 input_file [output_filename] [reference_filename] [perPixelError] [globalError]" << std::endl;
+      std::cerr << "Usage: ./HW3 input_file [output_filename] [reference_filename] [perPixelError] [globalError]" << std::endl;
       exit(1);
   }
   //load the image and give us our input and output pointers
-  preProcess(&h_inputImageRGBA, &h_outputImageRGBA, &d_inputImageRGBA, &d_outputImageRGBA,
-             &d_redBlurred, &d_greenBlurred, &d_blueBlurred,
-             &h_filter, &filterWidth, input_file);
+  preProcess(&d_luminance, &d_cdf,
+             &numRows, &numCols, &numBins, input_file);
 
-  allocateMemoryAndCopyToGPU(numRows(), numCols(), h_filter, filterWidth);
   GpuTimer timer;
+  float min_logLum, max_logLum;
+  min_logLum = 0.f;
+  max_logLum = 1.f;
   timer.Start();
   //call the students' code
-  your_gaussian_blur(h_inputImageRGBA, d_inputImageRGBA, d_outputImageRGBA, numRows(), numCols(),
-                     d_redBlurred, d_greenBlurred, d_blueBlurred, filterWidth);
+  your_histogram_and_prefixsum(d_luminance, d_cdf, min_logLum, max_logLum,
+                               numRows, numCols, numBins);
   timer.Stop();
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
   int err = printf("Your code ran in: %f msecs.\n", timer.Elapsed());
@@ -93,30 +95,29 @@ int main(int argc, char **argv) {
     exit(1);
   }
 
-  //check results and output the blurred image
+  float *h_luminance = (float *) malloc(sizeof(float)*numRows*numCols);
+  unsigned int *h_cdf = (unsigned int *) malloc(sizeof(unsigned int)*numBins);
 
-  size_t numPixels = numRows()*numCols();
-  //copy the output back to the host
-  checkCudaErrors(cudaMemcpy(h_outputImageRGBA, d_outputImageRGBA, sizeof(uchar4) * numPixels, cudaMemcpyDeviceToHost));
+  checkCudaErrors(cudaMemcpy(h_luminance, d_luminance, numRows*numCols*sizeof(float), cudaMemcpyDeviceToHost));
 
-  postProcess(output_file, h_outputImageRGBA);
+  //check results and output the tone-mapped image
+  postProcess(output_file, numRows, numCols, min_logLum, max_logLum);
 
-  referenceCalculation(h_inputImageRGBA, h_outputImageRGBA,
-                       numRows(), numCols(),
-                       h_filter, filterWidth);
+  for (size_t i = 1; i < numCols * numRows; ++i) {
+    min_logLum = std::min(h_luminance[i], min_logLum);
+    max_logLum = std::max(h_luminance[i], max_logLum);
+  }
 
-  postProcess(reference_file, h_outputImageRGBA);
+  referenceCalculation(h_luminance, h_cdf, numRows, numCols, numBins, min_logLum, max_logLum);
 
-    //  Cheater easy way with OpenCV
-    //generateReferenceImage(input_file, reference_file, filterWidth);
+  checkCudaErrors(cudaMemcpy(d_cdf, h_cdf, sizeof(unsigned int) * numBins, cudaMemcpyHostToDevice));
+
+  //check results and output the tone-mapped image
+  postProcess(reference_file, numRows, numCols, min_logLum, max_logLum);
+
+  cleanupGlobalMemory();
 
   compareImages(reference_file, output_file, useEpsCheck, perPixelError, globalError);
-
-  checkCudaErrors(cudaFree(d_redBlurred));
-  checkCudaErrors(cudaFree(d_greenBlurred));
-  checkCudaErrors(cudaFree(d_blueBlurred));
-
-  cleanUp();
 
   return 0;
 }
