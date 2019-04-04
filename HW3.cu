@@ -1,6 +1,8 @@
-#include "utils.h"
 #include <string>
+
+#include "utils.h"
 #include "loadSaveImage.h"
+
 #include <thrust/extrema.h>
 
 //chroma-LogLuminance Space

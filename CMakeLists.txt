@@ -15,7 +15,7 @@ file( GLOB  cu  *.cu)
 
 include_directories( ${OpenCV_INCLUDE_DIRS} )
 include_directories( ${CUDA_INCLUDE_DIRS} )
-set(problem_set_3_files main.cpp reference_calc.cpp compare.cpp)
+set(problem_set_3_files main.cpp reference_calc.cpp compare.cpp loadSaveImage.cpp)
 
 add_executable(prob3 ${problem_set_3_files} ${hdr} ${cu})
 target_include_directories(prob3 PUBLIC "${CMAKE_SOURCE_DIR}/*h")

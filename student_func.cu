@@ -78,16 +78,20 @@
   steps.
 
 */
+#include <cmath>
+#include <cstdlib>
+
+#include <cuda_runtime.h>
 
 #include "utils.h"
 
-const int BLOCK_SIZE = 1024
+const int BLOCK_SIZE = 1024;
 
 __global__
 void shared_reduce_kernel_min(const float* const d_logLuminance,
                               float* d_write_reduce_to,
                               const int input_size) {
-  extern __shared__ float shared_output[]
+  extern __shared__ float shared_output[];
 
   int global_id = threadIdx.x + blockDim.x * blockIdx.x;
   int local_id = threadIdx.x;
@@ -98,7 +102,7 @@ void shared_reduce_kernel_min(const float* const d_logLuminance,
   } else {
     shared_output[local_id] = d_write_reduce_to[global_id];
   }
-  __synchthreads();
+  __syncthreads(); 
   
   
   for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
@@ -106,11 +110,11 @@ void shared_reduce_kernel_min(const float* const d_logLuminance,
       shared_output[local_id] = min(shared_output[local_id],
                                     shared_output[local_id + s]);
     }
-    __synchthreads();
+    __syncthreads();
   }
 
   if (local_id == 0) {
-    d_write_reduce_to[blockIdx.x] = shared_data[0];
+    d_write_reduce_to[blockIdx.x] = shared_output[0];
   }
 }
 
@@ -118,7 +122,7 @@ __global__
 void shared_reduce_kernel_max(const float* const d_logLuminance,
                               float* d_write_reduce_to,
                               const int input_size) {
-  extern __shared__ float shared_output[]
+  extern __shared__ float shared_output[];
 
   int global_id = threadIdx.x + blockDim.x * blockIdx.x;
   int local_id = threadIdx.x;
@@ -129,7 +133,7 @@ void shared_reduce_kernel_max(const float* const d_logLuminance,
   } else {
     shared_output[local_id] = d_write_reduce_to[global_id];
   }
-  __synchthreads();
+  __syncthreads();
   
   
   for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
@@ -137,11 +141,11 @@ void shared_reduce_kernel_max(const float* const d_logLuminance,
       shared_output[local_id] = max(shared_output[local_id],
                                     shared_output[local_id + s]);
     }
-    __synchthreads();
+    __syncthreads();
   }
 
   if (local_id == 0) {
-    d_write_reduce_to[blockIdx.x] = shared_data[0];
+    d_write_reduce_to[blockIdx.x] = shared_output[0];
   }
 }
 
@@ -160,7 +164,7 @@ void histogram_calculation(unsigned int* out_histo,
   }
 
   int bin = (int)((d_[global_id] - min_val) / (float)range_vals) * num_bins;
-  atomicAdd(&(out_histro[bin]), 1);
+  atomicAdd(&(out_histo[bin]), 1);
 }
 
 void find_max_and_min(const float* const d_logLuminance,
@@ -179,13 +183,13 @@ void find_max_and_min(const float* const d_logLuminance,
                              d_logLuminance,
                              input_size * sizeof(float),
                              cudaMemcpyDeviceToDevice));
-  
+  float* d_reduce_output;
   while (output_size > 1) {
-    float* d_reduce_output;
-    checkCudaErrors(cudaMalloc((void**)&d_reduce_output),
-                               output_size * sizeof(float));
+    
+    checkCudaErrors(cudaMalloc((void**)&d_reduce_output,
+                               output_size * sizeof(float)));
     shared_reduce_kernel_min<<<grid_size, block_size>>>(d_reduce_output,
-                                                        d_reduce_intput,
+                                                        d_reduce_input,
                                                         input_size);
     checkCudaErrors(cudaFree(d_reduce_input));
 
@@ -197,7 +201,7 @@ void find_max_and_min(const float* const d_logLuminance,
   }
 
   float* h_reduce_output= (float *)malloc(sizeof(float));
-  checkCudaErrors(cudaMemcpy(h_reduce_output, d_reduce_ouput, sizeof(float), cudaMemcpyDeviceToHost));
+  checkCudaErrors(cudaMemcpy(h_reduce_output, d_reduce_output, sizeof(float), cudaMemcpyDeviceToHost));
   min_logLum = h_reduce_output[0];
 }
                       
@@ -220,5 +224,6 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
     4) Perform an exclusive scan (prefix sum) on the histogram to get
        the cumulative distribution of luminance values (this should go in the
        incoming d_cdf pointer which already has been allocated for you)       */
-  find_max_and_min(d_logLuminance, min_logLum, max_logLum);
+  int input_size = numRows*numCols;
+  find_max_and_min(d_logLuminance, min_logLum, max_logLum, input_size);
 }
