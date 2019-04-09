@@ -80,129 +80,190 @@
 */
 #include <cmath>
 #include <cstdlib>
+#include <unordered_map>
+#include <string>
 
 #include <cuda_runtime.h>
 
 #include "utils.h"
 
 const int BLOCK_SIZE = 1024;
+const std::string MAX = "MAX";
+const std::string MIN = "MIN";
+typedef float (*reduce_callback)(float, float);
+
+__device__
+float max_val(float value_1, float value_2) {
+  return value_1 < value_2 ? value_2 : value_1;
+}
+
+__device__
+float min_val(float value_1, float value_2) {
+  return value_1 < value_2 ? value_1 : value_2;
+}
+
+// __device__ 
+// callback_map get_reduce_function{
+//   {"MAX", max_val},
+//   {"MIN", min_val}
+// };
+
+void print_device_array(const float* const d_array, int size) {
+  float* h_array = (float*)malloc(size * sizeof(float));
+  checkCudaErrors(cudaMemcpy(h_array, d_array, size*sizeof(float),
+                             cudaMemcpyDeviceToHost));
+  printf("Array \n");
+  for (int i = 0; i < size; ++i) {
+    printf("%.3f%c", h_array[i], ((i == size - 1) ? '\n' : ' '));
+  }
+  free(h_array);
+}
 
 __global__
-void shared_reduce_kernel_min(const float* const d_logLuminance,
-                              float* d_write_reduce_to,
-                              const int input_size) {
+void reduce_kernel(const float* const d_input_array,
+                          float* d_output_array,
+                          const int input_size,
+                          bool find_max) {
   extern __shared__ float shared_output[];
 
   int global_id = threadIdx.x + blockDim.x * blockIdx.x;
   int local_id = threadIdx.x;
 
-  // thread_copies_input_data_to shared_memory
   if (global_id >= input_size) {
-    shared_output[local_id] = d_write_reduce_to[0];
+    shared_output[local_id] = d_input_array[0];
   } else {
-    shared_output[local_id] = d_write_reduce_to[global_id];
+    shared_output[local_id] = d_input_array[global_id];
   }
   __syncthreads(); 
   
-  
   for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
     if (local_id < s) {
-      shared_output[local_id] = min(shared_output[local_id],
-                                    shared_output[local_id + s]);
+      if (find_max) {
+        shared_output[local_id] = max_val(shared_output[local_id],
+                                          shared_output[local_id + s]);
+      } else {
+        shared_output[local_id] = min_val(shared_output[local_id],
+                                          shared_output[local_id + s]);
+      }
     }
     __syncthreads();
   }
 
   if (local_id == 0) {
-    d_write_reduce_to[blockIdx.x] = shared_output[0];
+    d_output_array[blockIdx.x] = shared_output[0];
   }
 }
 
 __global__
-void shared_reduce_kernel_max(const float* const d_logLuminance,
-                              float* d_write_reduce_to,
-                              const int input_size) {
-  extern __shared__ float shared_output[];
-
-  int global_id = threadIdx.x + blockDim.x * blockIdx.x;
-  int local_id = threadIdx.x;
-
-  // thread_copies_input_data_to shared_memory
-  if (global_id >= input_size) {
-    shared_output[local_id] = d_write_reduce_to[0];
-  } else {
-    shared_output[local_id] = d_write_reduce_to[global_id];
-  }
-  __syncthreads();
-  
-  
-  for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
-    if (local_id < s) {
-      shared_output[local_id] = max(shared_output[local_id],
-                                    shared_output[local_id + s]);
-    }
-    __syncthreads();
-  }
-
-  if (local_id == 0) {
-    d_write_reduce_to[blockIdx.x] = shared_output[0];
-  }
-}
-
-__global__
-void histogram_calculation(unsigned int* out_histo, 
-                           const float* d_, 
+void histogram_calculation(unsigned int* d_histo, 
+                           const float* d_logLuminance, 
                            int num_bins, 
                            int input_size,
                            float min_val,
                            float range_vals) {
-  int thread_id = threadIdx.x;
   int global_id = threadIdx.x + blockDim.x * blockIdx.x;
   
   if (global_id >= input_size) {
     return;
   }
 
-  int bin = (int)((d_[global_id] - min_val) / (float)range_vals) * num_bins;
-  atomicAdd(&(out_histo[bin]), 1);
+  int bin = (int)((d_histo[global_id] - min_val) / (float)range_vals) * num_bins;
+  atomicAdd(&(d_histo[bin]), 1);
+}
+
+__global__
+void blelloch_scan_single_block(unsigned int* d_cdf, int num_bins) {
+  extern __shared__ unsigned int scan_array[];
+  int thread_id = threadIdx.x;
+  scan_array[thread_id] = d_cdf[thread_id];
+  
+  int stride = 1;
+  while (stride <= num_bins) {
+    int index = (threadIdx.x + 1)*stride*2 - 1;
+    if (index <  2*BLOCK_SIZE) {
+      scan_array[index] += scan_array[index - stride];
+    }
+    stride = stride * 2;
+    __syncthreads();
+  }
+
+  if (thread_id == 0) {
+    scan_array[num_bins - 1] = 0;
+  }
+
+  stride = BLOCK_SIZE / 2;
+  while (stride > 0) {
+    int index = (thread_id + 1) * stride*2 - 1;
+    if((index + stride) < 2 * BLOCK_SIZE) {
+      scan_array[index + stride] += scan_array[index];
+    }
+    stride = stride/2;
+    __syncthreads();
+  }
+
+  d_cdf[thread_id] = scan_array[thread_id];
+}
+
+unsigned int* compute_histogram(const float* const d_logLuminance,
+                                int num_bins,
+                                int input_size,
+                                int min_logLum,
+                                int range) {
+  unsigned int* d_histo;
+  checkCudaErrors(cudaMalloc(&d_histo, num_bins * sizeof(unsigned int)));
+  checkCudaErrors(cudaMemset(d_histo, 0, num_bins * sizeof(unsigned int)));
+
+  int threads_per_block = BLOCK_SIZE;
+  int output_size = 1 + (input_size - 1) / BLOCK_SIZE;
+  dim3 block_size = dim3(threads_per_block, 1, 1);
+  dim3 grid_size = dim3(output_size);
+  
+  histogram_calculation<<<grid_size, block_size>>>(d_histo,
+                                                   d_logLuminance,
+                                                   num_bins,
+                                                   input_size,
+                                                   min_logLum,
+                                                   range);
+
+  unsigned int* h_histo = (unsigned int*) malloc(num_bins * sizeof(unsigned int));
+  checkCudaErrors(cudaMemcpy(h_histo, d_histo, sizeof(unsigned int), cudaMemcpyDeviceToHost));
+  checkCudaErrors(cudaFree(d_histo));
+  return h_histo;
 }
 
 void find_max_and_min(const float* const d_logLuminance,
-                      float& min_logLum,
-                      float& max_logLum,
-                      int input_size) {
+                      float& val_logLum,
+                      int input_size,
+                      bool find_max) {
   int threads_per_block = BLOCK_SIZE;
-  int output_size= (input_size - 1)/BLOCK_SIZE + 1;
-  dim3 block_size = dim3(threads_per_block, 1, 1);
-  dim3 grid_size = dim3(output_size, 1, 1);
+  int output_size = 1 + (input_size - 1) / BLOCK_SIZE;
 
-  float* d_reduce_input;
-  checkCudaErrors(cudaMalloc((void**)&d_reduce_input,
+  float* d_input;
+  checkCudaErrors(cudaMalloc((void**)&d_input,
                              input_size * sizeof(float)));
-  checkCudaErrors(cudaMemcpy(d_reduce_input,
+  checkCudaErrors(cudaMemcpy(d_input,
                              d_logLuminance,
                              input_size * sizeof(float),
                              cudaMemcpyDeviceToDevice));
-  float* d_reduce_output;
-  while (output_size > 1) {
-    
-    checkCudaErrors(cudaMalloc((void**)&d_reduce_output,
+  float* d_output;
+  while (input_size > 1) {
+    checkCudaErrors(cudaMalloc((void**)&d_output,
                                output_size * sizeof(float)));
-    shared_reduce_kernel_min<<<grid_size, block_size>>>(d_reduce_output,
-                                                        d_reduce_input,
-                                                        input_size);
-    checkCudaErrors(cudaFree(d_reduce_input));
 
+    reduce_kernel<<<output_size, threads_per_block, threads_per_block * sizeof(float)>>>(
+      d_input, d_output, input_size, find_max);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+    checkCudaErrors(cudaFree(d_input));
     input_size = output_size;
     output_size = (input_size - 1) / BLOCK_SIZE + 1;
-    block_size = dim3(threads_per_block, 1, 1);
-    grid_size = dim3(output_size); 
-    d_reduce_input = d_reduce_output;
+    d_input = d_output;
   }
-
-  float* h_reduce_output= (float *)malloc(sizeof(float));
-  checkCudaErrors(cudaMemcpy(h_reduce_output, d_reduce_output, sizeof(float), cudaMemcpyDeviceToHost));
-  min_logLum = h_reduce_output[0];
+  
+  float* h_output= (float *)malloc(sizeof(float));
+  checkCudaErrors(cudaMemcpy(h_output, d_output, sizeof(float), cudaMemcpyDeviceToHost));
+  checkCudaErrors(cudaFree(d_output));
+  val_logLum = h_output[0];
 }
                       
 
@@ -214,16 +275,40 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   const size_t numCols,
                                   const size_t numBins)
 {
-  //TODO
-  /*Here are the steps you need to implement
-    1) find the minimum and maximum value in the input logLuminance channel
-       store in min_logLum and max_logLum
-    2) subtract them to find the range
-    3) generate a histogram of all the values in the logLuminance channel using
-       the formula: bin = (lum[i] - lumMin) / lumRange * numBins
-    4) Perform an exclusive scan (prefix sum) on the histogram to get
-       the cumulative distribution of luminance values (this should go in the
-       incoming d_cdf pointer which already has been allocated for you)       */
+  // This particular image had 240 cols and 294 rows
+  float* h_logLuminance = (float*)malloc(numRows*numCols*sizeof(float));
+  checkCudaErrors(cudaMemcpy(h_logLuminance,d_logLuminance,numRows*numCols*sizeof(float),
+                             cudaMemcpyDeviceToHost));
+  printf("\n\nREFERENCE CALCULATION (Min/Max): \n");
+  float logLumMin = h_logLuminance[0];
+  float logLumMax = h_logLuminance[0];
+  printf("num rows %d\n", numRows);
+  printf("num cols %d\n", numCols);
+  for (size_t i = 1; i < numCols * numRows; ++i) {
+    logLumMin = min(h_logLuminance[i], logLumMin);
+    logLumMax = max(h_logLuminance[i], logLumMax);
+  }
+  printf("  Min logLum: %f\n  Max logLum: %f\n",logLumMin,logLumMax);
+  free(h_logLuminance);
+
   int input_size = numRows*numCols;
-  find_max_and_min(d_logLuminance, min_logLum, max_logLum, input_size);
+  find_max_and_min(d_logLuminance, min_logLum, input_size, false);
+  find_max_and_min(d_logLuminance, max_logLum, input_size, true);
+
+  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+
+  printf("%f\n", min_logLum);
+  printf("%f\n", max_logLum);
+
+
+  int range = max_logLum - min_logLum;
+
+  unsigned int* h_histo = compute_histogram(d_logLuminance, numBins, 
+                                            input_size, min_logLum, range);
+  
+  checkCudaErrors(cudaMemcpy(d_cdf, h_histo, numBins*sizeof(unsigned int),
+                              cudaMemcpyHostToDevice));
+
+  blelloch_scan_single_block<<<1, BLOCK_SIZE, BLOCK_SIZE * sizeof(unsigned int)>>>(d_cdf, numBins);
+  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 }
